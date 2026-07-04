@@ -7,11 +7,6 @@ recent history, and writes the results to a SQLite database.
 
 Run once:
     python src/fetch_weather.py
-
-This is the "E" and "T" and "L" of a lightweight ETL pipeline:
-  Extract  -> call the OpenWeatherMap API
-  Transform-> normalize the JSON response + flag anomalies
-  Load     -> insert into SQLite
 """
 
 import os
@@ -25,22 +20,25 @@ from db import init_db, insert_reading, get_recent_readings_for_city  # noqa: E4
 
 load_dotenv()
 
-API_KEY = os.getenv("OPENWEATHER_API_KEY")
-CITIES = [c.strip() for c in os.getenv("CITIES", "London,New York").split(",")]
-DB_PATH = os.getenv("DB_PATH", "weather_data.db")
-
 BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
 
 # Anomaly detection thresholds
-TEMP_JUMP_THRESHOLD_C = 5.0     # sudden change vs. last reading
-HUMIDITY_JUMP_THRESHOLD = 25    # sudden change vs. last reading
-HEATWAVE_THRESHOLD_C = 40.0     # absolute high
-COLD_SNAP_THRESHOLD_C = 0.0     # absolute low
+TEMP_JUMP_THRESHOLD_C = 5.0
+HUMIDITY_JUMP_THRESHOLD = 25
+HEATWAVE_THRESHOLD_C = 40.0
+COLD_SNAP_THRESHOLD_C = 0.0
 
 
-def fetch_city_weather(city: str) -> dict:
+def _get_config():
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    cities = [c.strip() for c in os.getenv("CITIES", "London,New York").split(",") if c.strip()]
+    db_path = os.getenv("DB_PATH", "weather_data.db")
+    return api_key, cities, db_path
+
+
+def fetch_city_weather(city: str, api_key: str) -> dict:
     """Call the OpenWeatherMap API for a single city and return raw JSON."""
-    params = {"q": city, "appid": API_KEY, "units": "metric"}
+    params = {"q": city, "appid": api_key, "units": "metric"}
     response = requests.get(BASE_URL, params=params, timeout=10)
     response.raise_for_status()
     return response.json()
@@ -62,12 +60,11 @@ def normalize_reading(city: str, raw: dict) -> dict:
     }
 
 
-def detect_anomaly(city: str, reading: dict) -> dict:
+def detect_anomaly(city: str, reading: dict, db_path: str) -> dict:
     """
     Flag a reading as anomalous if:
       - temperature crosses heatwave / cold-snap thresholds, OR
       - temperature or humidity jumped sharply vs. the previous reading
-    Mutates and returns the reading dict with is_anomaly / anomaly_reason set.
     """
     reasons = []
     temp = reading.get("temperature_c")
@@ -79,7 +76,7 @@ def detect_anomaly(city: str, reading: dict) -> dict:
         elif temp <= COLD_SNAP_THRESHOLD_C:
             reasons.append(f"Cold snap: {temp}°C")
 
-    history = get_recent_readings_for_city(city, limit=1)
+    history = get_recent_readings_for_city(city, limit=1, db_path=db_path)
     if history:
         last = history[0]
         last_temp = last.get("temperature_c")
@@ -87,15 +84,11 @@ def detect_anomaly(city: str, reading: dict) -> dict:
 
         if temp is not None and last_temp is not None:
             if abs(temp - last_temp) >= TEMP_JUMP_THRESHOLD_C:
-                reasons.append(
-                    f"Sudden temp change: {last_temp}°C -> {temp}°C"
-                )
+                reasons.append(f"Sudden temp change: {last_temp}°C -> {temp}°C")
 
         if humidity is not None and last_humidity is not None:
             if abs(humidity - last_humidity) >= HUMIDITY_JUMP_THRESHOLD:
-                reasons.append(
-                    f"Sudden humidity change: {last_humidity}% -> {humidity}%"
-                )
+                reasons.append(f"Sudden humidity change: {last_humidity}% -> {humidity}%")
 
     reading["is_anomaly"] = len(reasons) > 0
     reading["anomaly_reason"] = "; ".join(reasons) if reasons else None
@@ -103,10 +96,13 @@ def detect_anomaly(city: str, reading: dict) -> dict:
 
 
 def fetch_all():
-    """Fetch + store weather for every configured city. Entry point for the scheduler."""
-    if not API_KEY:
+    """Fetch + store weather for every configured city. Entry point for the scheduler / dashboard."""
+    api_key, cities, db_path = _get_config()
+
+    if not api_key:
         raise RuntimeError(
-            "OPENWEATHER_API_KEY is not set. Copy .env.example to .env and add your key."
+            "OPENWEATHER_API_KEY is not set. Copy .env.example to .env and add your key "
+            "(or set it in Streamlit secrets if running on Streamlit Cloud)."
         )
 
     init_db(db_path)
@@ -114,8 +110,6 @@ def fetch_all():
     errors = []
 
     for city in cities:
-        if not city:
-            continue
         try:
             raw = fetch_city_weather(city, api_key)
             reading = normalize_reading(city, raw)
@@ -134,9 +128,7 @@ def fetch_all():
             errors.append(f"{city}: {e}")
 
     if not results and errors:
-        raise RuntimeError(
-            f"All city fetches failed. First error: {errors[0]}"
-        )
+        raise RuntimeError(f"All city fetches failed. First error: {errors[0]}")
 
     return results
 
