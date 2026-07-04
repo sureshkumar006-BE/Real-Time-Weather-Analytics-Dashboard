@@ -2,5 +2,5 @@ requests==2.32.3
 python-dotenv==1.0.1
 schedule==1.2.2
 streamlit==1.38.0
-pandas
+pandas==2.2.2
 plotly==5.24.0
