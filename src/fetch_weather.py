@@ -109,14 +109,19 @@ def fetch_all():
             "OPENWEATHER_API_KEY is not set. Copy .env.example to .env and add your key."
         )
 
-    init_db(DB_PATH)
+    init_db(db_path)
+    results = []
+    errors = []
 
-    for city in CITIES:
+    for city in cities:
+        if not city:
+            continue
         try:
-            raw = fetch_city_weather(city)
+            raw = fetch_city_weather(city, api_key)
             reading = normalize_reading(city, raw)
-            reading = detect_anomaly(city, reading)
-            insert_reading(reading, DB_PATH)
+            reading = detect_anomaly(city, reading, db_path)
+            insert_reading(reading, db_path)
+            results.append(reading)
 
             flag = " ANOMALY" if reading["is_anomaly"] else ""
             print(
@@ -126,6 +131,14 @@ def fetch_all():
             )
         except requests.RequestException as e:
             print(f"[ERROR] Failed to fetch weather for {city}: {e}")
+            errors.append(f"{city}: {e}")
+
+    if not results and errors:
+        raise RuntimeError(
+            f"All city fetches failed. First error: {errors[0]}"
+        )
+
+    return results
 
 
 if __name__ == "__main__":
